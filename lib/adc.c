@@ -9,6 +9,11 @@
  * Habilita la alimentación (PRR)
  */
 
+/** 
+La librería está bien, pero no sabemos por qué sólo funciona correctamente
+con los prescaler X64 y X128
+**/
+
 #include"adc.h"
 #include <avr/io.h>
 
