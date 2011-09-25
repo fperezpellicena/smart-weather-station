@@ -1,3 +1,8 @@
+/** 
+La librería está bien, pero no sabemos por qué sólo funciona correctamente
+con los prescaler X64 y X128
+**/
+
 #ifndef ADC_H_
 #define ADC_H_
 
@@ -19,7 +24,7 @@ enum AdcPrescaler {
 	ADC_PRESCALER_X8 = 3,
 	ADC_PRESCALER_X16 = 4,
 	ADC_PRESCALER_X32 = 5,
-	ADC_PRESCALER_X64 = 6,
+	ADC_PRESCALER_X64 = 6,		/** Usar los prescaler de X64 o X128 **/
 	ADC_PRESCALER_X128 = 7
 };
 
