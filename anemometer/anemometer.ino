@@ -60,9 +60,7 @@ void loop() {
   if (time >= nextCalcSpeed) {
     calcWindSpeed();
     nextCalcSpeed = time + MSECS_CALC_WIND_SPEED;
-    tx = Tx16Request(0x1874, payload, sizeof(payload));  //Estas dos lineas habra que modificarlas a puerto serie de momento
-    xbee.send(tx);
-  }
+    }
 }
 
 //=======================================================
@@ -75,24 +73,22 @@ void countAnemometer() {
 
 //=======================================================
 // Calculate the wind speed, and display it (or log it, whatever).
-// 1 rev/sec = 1.492 mph
+// 1 rev/sec = 2.4 Km/h
 //=======================================================
 void calcWindSpeed() {
   int x, iSpeed;
-  // This will produce mph * 10
-  // (didn't calc right when done as one statement)
-  long speed = 14920;
+  // This will produce Km/h *100 (esto es as pq la uart no puede mandar FLOAT y hay que mandarlo como integer,
+  // en el ordenador habra que coger este nmero y dividirlo entre 100 para sacar Km/h)
+  // (No calcula bien si lo haces en una sola sentencia)
+  long speed = 240000;
   speed *= numRevsAnemometer;
   speed /= MSECS_CALC_WIND_SPEED;
   iSpeed = speed;         // Need this for formatting below
 
   Serial.print("Wind speed: ");
-  x = iSpeed / 10;
+  x = iSpeed;
   Serial.print(x);
-  Serial.print('.');
-  x = iSpeed % 10;
-  Serial.print(x);
-
+  
   numRevsAnemometer = 0;        // Reset counter
 }
 
