@@ -1,0 +1,1 @@
+Microcontroller and xbee based weather station, including anemometer, wind vane, rain gauge, pressure and temperature sensors.
