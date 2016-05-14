@@ -92,41 +92,24 @@
     .011 inches of rain, according to the docs.
 
 */
-
-#include <XBee.h>
 #include <Wire.h>
+#include <SPI.h>
+#include <SD.h>
 
 #define uint  unsigned int
 #define ulong unsigned long
 
-/*..............................................................................*/
-/* XBEE */
-// XBee object
-XBee xbee = XBee();
-
-// XBee request
-Tx16Request tx;
-
-// XBee payload
-// FIXME Resize to fit complete data
-uint8_t payload[] = { 0, 0 };
-
-/* END XBEE */
-/*..............................................................................*/
 
 /*..............................................................................*/
 /* STATION */
 #define PIN_ANEMOMETER  2     // Digital 2
 #define PIN_VANE        5     // Analog 5
 
-// How often we want to calculate wind speed or direction
-#define MSECS_CALC_WIND_SPEED 5000
-#define MSECS_CALC_WIND_DIR   5000
+// How often we want to get measures
+#define MSECS_CYCLE 5000
 
 volatile int numRevsAnemometer = 0; // Incremented in the interrupt
-ulong nextCalcSpeed;                // When we next calc the wind speed
-ulong nextCalcDir;                  // When we next calc the direction
-ulong nextCalcBMP;
+ulong nextCycle;
 ulong time;                         // Millis() at each start of loop().
 ulong numBuckettip;
 
@@ -140,7 +123,27 @@ ulong   adc[NUMDIRS] = {26, 45, 77, 118, 161, 196, 220, 256};
 char *strVals[NUMDIRS] = {"W","NW","N","SW","NE","S","SE","E"};
 byte dirOffset=0;
 
+struct WeatherData {
+	String windSpeed;
+	String windDir;
+	String rain;
+	String temperature;
+	String pressure;
+};
+
+WeatherData weatherData;
+
 /* END STATION */
+/*..............................................................................*/
+
+/*..............................................................................*/
+/* SD CARD */
+#define LOG_FILENAME	"datalog.txt"
+
+const int chipSelect = 4;
+File dataFile;
+
+/* END SDCARD */
 /*..............................................................................*/
 
 /*..............................................................................*/
@@ -177,49 +180,73 @@ long pressure;
 // Initialize
 //=======================================================
 void setup() {
-   // Init XBee
-   xbee.begin(9600);
-   // Init arduino i/o
-   pinMode(PIN_ANEMOMETER, INPUT);
-   digitalWrite(PIN_ANEMOMETER, HIGH);
-   attachInterrupt(0, countAnemometer, FALLING);
-   attachInterrupt(1, countRainmeter, FALLING);
-   nextCalcSpeed = millis() + MSECS_CALC_WIND_SPEED;
-   nextCalcDir   = millis() + MSECS_CALC_WIND_DIR;
-   // Init i2c
-   Wire.begin();
-   // Perform calibration
-   bmp085Calibration();
+   Serial.begin(9600);	// Init serial
+   initIO();
+   initSdCard();
+   initBmp085();
+}
+
+void initIO() {
+	Serial.print("Initializing I/O...");
+	pinMode(PIN_ANEMOMETER, INPUT);
+	digitalWrite(PIN_ANEMOMETER, HIGH);
+	attachInterrupt(0, countAnemometer, FALLING);
+	attachInterrupt(1, countRainmeter, FALLING);
+	nextCycle = millis() + MSECS_CYCLE;
+	Serial.println("I/O initialized.");
+}
+
+void initSdCard() {
+	Serial.print("Initializing SD card...");
+	// see if the card is present and can be initialized:
+	if (!SD.begin(chipSelect)) {
+		Serial.println("Card failed, or not present");
+		// don't do anything more:
+		return;
+	}
+	Serial.println("card initialized.");
+}
+
+void initBmp085(){
+	Serial.print("Initializing BMP085...");
+	// Init i2c
+	Wire.begin();
+	// Perform calibration
+	bmp085Calibration();
+	Serial.print("BMP085 calibrated.");
+}
+
+// open the file. note that only one file can be open at a time,
+// so you have to close this one before opening another.
+void openLogFile() {
+	Serial.print("Opening sd card file...");
+	dataFile = SD.open(LOG_FILENAME, FILE_WRITE);
+	if (!dataFile) {
+		Serial.print("Error opening sd card file...");
+	}
+}
+
+void writeWeatherData() {
+	String data = weatherData.windSpeed + "," 
+		+ weatherData.windDir + "," 
+		+ weatherData.rain + "," 
+		+ weatherData.temperature + "," 
+		+ weatherData.pressure;
+	dataFile.println(data);
 }
 
 //=======================================================
 // Main loop.
-// TODO Emplear modo de bajo consumo
-//   set_sleep_mode(SLEEP_MODE_PWR_DOWN);   
-//   sleep_enable();          
-//   sleep_mode();
-//   sleep_disable();
 //=======================================================
 void loop() {
    time = millis();
 
-   if (time >= nextCalcSpeed) {
-      calcWindSpeed();
-      nextCalcSpeed = time + MSECS_CALC_WIND_SPEED;
-      tx = Tx16Request(0x1874, payload, sizeof(payload));
-      xbee.send(tx);
-   }
-   if (time >= nextCalcDir) {
-      calcWindDir();
-      nextCalcDir = time + MSECS_CALC_WIND_DIR;
-      tx = Tx16Request(0x1874, payload, sizeof(payload));
-      xbee.send(tx);
-   }
-   if (time >= nextCalcBMP) {
-      calcBMP085();
-      nextCalcDir = time + MSECS_CALC_WIND_DIR;
-      tx = Tx16Request(0x1874, payload, sizeof(payload));
-      xbee.send(tx);
+   if (time >= nextCycle) {
+		calcWindSpeed();
+		calcWindDir();
+		calcBMP085();
+		writeWeatherData();
+		nextCycle = time + MSECS_CYCLE;
    }
 }
 
@@ -235,23 +262,26 @@ void countAnemometer() {
 // Find vane direction.
 //=======================================================
 void calcWindDir() {
-   int val;
-   byte x, reading;
+	String formattedWindDir = "windDir:";
+	int val;
+	byte x, reading;
 
-   val = analogRead(PIN_VANE);
-   val >>=2;                        // Shift to 255 range
-   reading = val;
+	val = analogRead(PIN_VANE);
+	val >>= 2;                        // Shift to 255 range
+	reading = val;
 
-   // Look the reading up in directions table. Find the first value
-   // that's >= to what we got.
-   for (x=0; x<NUMDIRS; x++) {
-      if (adc[x] >= reading)
-         break;
-   }
-   //Serial.println(reading, DEC);
-   x = (x + dirOffset) % 8;   // Adjust for orientation
-   Serial.print("  Dir: ");
-   Serial.println(strVals[x]);
+	// Look the reading up in directions table. Find the first value
+	// that's >= to what we got.
+	for (x=0; x < NUMDIRS; x++) {
+	  if (adc[x] >= reading)
+		 break;
+	}
+	//Serial.println(reading, DEC);
+	x = (x + dirOffset) % 8;   // Adjust for orientation
+	Serial.print("  Dir: ");
+	Serial.println(strVals[x]);
+	formattedWindDir += strVals[x];
+	weatherData.windDir = formattedWindDir;
 }
 
 
@@ -260,22 +290,23 @@ void calcWindDir() {
 // 1 rev/sec = 1.492 mph
 //=======================================================
 void calcWindSpeed() {
-   int x, iSpeed;
-   // This will produce mph * 10
-   // (didn't calc right when done as one statement)
-   long speed = 14920;
-   speed *= numRevsAnemometer;
-   speed /= MSECS_CALC_WIND_SPEED;
-   iSpeed = speed;         // Need this for formatting below
+	String formattedWindSpeed = "windSpeed:";
+	int integer, decimal, iSpeed;
+	// This will produce mph * 10
+	// (didn't calc right when done as one statement)
+	long speed = 14920;
+	speed *= numRevsAnemometer;
+	speed /= MSECS_CYCLE;
+	iSpeed = speed;         // Need this for formatting below
 
-   Serial.print("Wind speed: ");
-   x = iSpeed / 10;
-   Serial.print(x);
-   Serial.print('.');
-   x = iSpeed % 10;
-   Serial.print(x);
-
-   numRevsAnemometer = 0;        // Reset counter
+	Serial.print("Wind speed: ");
+	integer = iSpeed / 10;
+	decimal = iSpeed % 10;
+	formattedWindSpeed += integer;
+	formattedWindSpeed += '.';
+	formattedWindSpeed += decimal;
+	weatherData.windSpeed = formattedWindSpeed;	
+	numRevsAnemometer = 0;        // Reset counter
 }
 
 //=======================================================
@@ -283,30 +314,40 @@ void calcWindSpeed() {
 // switch triggers (one tip of bucket).
 //=======================================================
 void countRainmeter() {
-  static unsigned long last_millis = 0;
-  unsigned long m = millis();
-  if (m - last_millis < 200) {
-    // ignore interrupt: probably a bounce problem  
-  }else {
-    numBuckettip++;  
-    //Serial.print(numBuckettip);  
-  }
-  last_millis = m;
+	String rainFormatted = "rain:";
+	static unsigned long last_millis = 0;
+	unsigned long m = millis();
+	if (m - last_millis < 200) {
+	// ignore interrupt: probably a bounce problem  
+	}else {
+		numBuckettip++;  
+		rainFormatted += numBuckettip;
+		weatherData.rain = rainFormatted;	
+		Serial.print(numBuckettip);  
+	}
+	last_millis = m;
 }
 
 //=======================================================
 // Calculate temperature and pressure
 //=======================================================
 void calcBMP085() {
-  temperature = bmp085GetTemperature(bmp085ReadUT());
-  pressure = bmp085GetPressure(bmp085ReadUP());
-  Serial.print("Temperature: ");
-  Serial.print(temperature, DEC);
-  Serial.println(" *0.1 deg C");
-  Serial.print("Pressure: ");
-  Serial.print(pressure, DEC);
-  Serial.println(" Pa");
-  Serial.println();
+	String temperatureFormatted = "temperature:";
+	String pressureFormatted = "pressure:";
+	temperature = bmp085GetTemperature(bmp085ReadUT());
+	temperatureFormatted += temperature;
+	weatherData.temperature = temperatureFormatted;	
+	pressure = bmp085GetPressure(bmp085ReadUP());
+	pressureFormatted += pressure;
+	weatherData.pressure = pressureFormatted;	
+	// Logs
+	Serial.print("Temperature: ");
+	Serial.print(temperature, DEC);
+	Serial.println(" *0.1 deg C");
+	Serial.print("Pressure: ");
+	Serial.print(pressure, DEC);
+	Serial.println(" Pa");
+	Serial.println();
 }
 
 // Stores all of the bmp085's calibration values into global variables
@@ -382,14 +423,14 @@ char bmp085Read(unsigned char address)
   unsigned char data;
   
   Wire.beginTransmission(BMP085_ADDRESS);
-  Wire.send(address);
+  Wire.write(address);
   Wire.endTransmission();
   
   Wire.requestFrom(BMP085_ADDRESS, 1);
   while(!Wire.available())
     ;
     
-  return Wire.receive();
+  return Wire.read();
 }
 
 // Read 2 bytes from the BMP085
@@ -400,14 +441,14 @@ int bmp085ReadInt(unsigned char address)
   unsigned char msb, lsb;
   
   Wire.beginTransmission(BMP085_ADDRESS);
-  Wire.send(address);
+  Wire.write(address);
   Wire.endTransmission();
   
   Wire.requestFrom(BMP085_ADDRESS, 2);
   while(Wire.available()<2)
     ;
-  msb = Wire.receive();
-  lsb = Wire.receive();
+  msb = Wire.read();
+  lsb = Wire.read();
   
   return (int) msb<<8 | lsb;
 }
@@ -420,8 +461,8 @@ unsigned int bmp085ReadUT()
   // Write 0x2E into Register 0xF4
   // This requests a temperature reading
   Wire.beginTransmission(BMP085_ADDRESS);
-  Wire.send(0xF4);
-  Wire.send(0x2E);
+  Wire.write(0xF4);
+  Wire.write(0x2E);
   Wire.endTransmission();
   
   // Wait at least 4.5ms
@@ -441,8 +482,8 @@ unsigned long bmp085ReadUP()
   // Write 0x34+(OSS<<6) into register 0xF4
   // Request a pressure reading w/ oversampling setting
   Wire.beginTransmission(BMP085_ADDRESS);
-  Wire.send(0xF4);
-  Wire.send(0x34 + (OSS<<6));
+  Wire.write(0xF4);
+  Wire.write(0x34 + (OSS<<6));
   Wire.endTransmission();
   
   // Wait for conversion, delay time dependent on OSS
@@ -450,16 +491,16 @@ unsigned long bmp085ReadUP()
   
   // Read register 0xF6 (MSB), 0xF7 (LSB), and 0xF8 (XLSB)
   Wire.beginTransmission(BMP085_ADDRESS);
-  Wire.send(0xF6);
+  Wire.write(0xF6);
   Wire.endTransmission();
   Wire.requestFrom(BMP085_ADDRESS, 3);
   
   // Wait for data to become available
   while(Wire.available() < 3)
     ;
-  msb = Wire.receive();
-  lsb = Wire.receive();
-  xlsb = Wire.receive();
+  msb = Wire.read();
+  lsb = Wire.read();
+  xlsb = Wire.read();
   
   up = (((unsigned long) msb << 16) | ((unsigned long) lsb << 8) | (unsigned long) xlsb) >> (8-OSS);
   
